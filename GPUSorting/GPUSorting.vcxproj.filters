@@ -41,5 +41,6 @@
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="Shaders\ComputeShader2.hlsl" />
+    <FxCompile Include="Shaders\ComputeShader3.hlsl" />
   </ItemGroup>
 </Project>

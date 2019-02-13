@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <chrono>
 #include <iostream>
 using namespace Microsoft::WRL;
 
@@ -44,7 +45,7 @@ void PopulateComputeCommandQueue(GPUComputing& computing);
 int main()
 {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
-
+	system("pause");
 	CreateDevice();
 	CreateCopyCommandInterface();
 
@@ -57,7 +58,6 @@ int main()
 
 	CreateShader();
 	gpuComputing.init(device.Get(), computeBlob, outputRootSignature.Get());
-	PopulateComputeCommandQueue(gpuComputing);
 
 	//Copy upload data to uav
 	copyAllocator->Reset();
@@ -71,11 +71,18 @@ int main()
 	WaitForGPU(copyQueue.Get());
 
 	//run computeShader
+	double time = 0;
+	auto start  = std::chrono::high_resolution_clock::now();
+	while(time < 10)
 	{
+		PopulateComputeCommandQueue(gpuComputing);
 		ID3D12CommandList* listsToExecute[] = {gpuComputing.CommandList()};
 		gpuComputing.CommandQueue()->ExecuteCommandLists(ARRAYSIZE(listsToExecute), listsToExecute);
 
 		WaitForGPU(gpuComputing.CommandQueue());
+		auto end									  = std::chrono::high_resolution_clock::now();
+		std::chrono::duration<double> elapsed_seconds = end - start;
+		time										  = elapsed_seconds.count();
 	}
 
 	//Copy uav data to readback
@@ -89,8 +96,8 @@ int main()
 
 	WaitForGPU(copyQueue.Get());
 
-	unsigned int* bufferdata;
-	D3D12_RANGE readRange = {0, outputBufferSize * sizeof(unsigned int)};
+	float* bufferdata;
+	D3D12_RANGE readRange = {0, outputBufferSize * sizeof(float)};
 	bufferReadback->Map(0, &readRange, reinterpret_cast<void**>(&bufferdata));
 	std::cout << "\nParsed Data:\n";
 	for(int i = 0; i < outputBufferSize; i++)
@@ -98,6 +105,7 @@ int main()
 		std::cout << bufferdata[i] << std::endl;
 	}
 	bufferReadback->Unmap(0, nullptr);
+	system("pause");
 	return 0;
 }
 
@@ -221,7 +229,7 @@ void CreateBuffers()
 {
 	D3D12_HEAP_PROPERTIES srvHeapProperties{CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT)};
 	D3D12_RESOURCE_DESC srvBufferDesc{CD3DX12_RESOURCE_DESC::Buffer(outputBufferSize)};
-	srvBufferDesc.Width = sizeof(unsigned int) * outputBufferSize;
+	srvBufferDesc.Width = sizeof(float) * outputBufferSize;
 	srvBufferDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 	ThrowIfFailed(device->CreateCommittedResource(&srvHeapProperties,
 												  D3D12_HEAP_FLAG_NONE,
@@ -234,7 +242,7 @@ void CreateBuffers()
 
 	D3D12_HEAP_PROPERTIES uavHeapProperties{CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT)};
 	D3D12_RESOURCE_DESC uavBufferDesc{CD3DX12_RESOURCE_DESC::Buffer(outputBufferSize)};
-	uavBufferDesc.Width = sizeof(unsigned int) * outputBufferSize;
+	uavBufferDesc.Width = sizeof(float) * outputBufferSize;
 	uavBufferDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 	ThrowIfFailed(device->CreateCommittedResource(&uavHeapProperties,
 												  D3D12_HEAP_FLAG_NONE,
@@ -247,7 +255,7 @@ void CreateBuffers()
 
 	D3D12_HEAP_PROPERTIES defaultHeapProperties{CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD)};
 	D3D12_RESOURCE_DESC outputBufferDesc{CD3DX12_RESOURCE_DESC::Buffer(outputBufferSize)};
-	outputBufferDesc.Width = sizeof(unsigned int) * outputBufferSize;
+	outputBufferDesc.Width = sizeof(float) * outputBufferSize;
 	ThrowIfFailed(device->CreateCommittedResource(&defaultHeapProperties,
 												  D3D12_HEAP_FLAG_NONE,
 												  &outputBufferDesc,
@@ -270,7 +278,7 @@ void CreateBuffers()
 	D3D12_RESOURCE_DESC buffersDesc = {};
 	buffersDesc.Dimension			= D3D12_RESOURCE_DIMENSION_BUFFER;
 	buffersDesc.Alignment			= 0;
-	buffersDesc.Width				= sizeof(unsigned int) * outputBufferSize;
+	buffersDesc.Width				= sizeof(float) * outputBufferSize;
 	buffersDesc.Height				= 1;
 	buffersDesc.DepthOrArraySize	= 1;
 	buffersDesc.MipLevels			= 1;
@@ -307,7 +315,7 @@ void CreateUAV()
 	uavDesc.ViewDimension					 = D3D12_UAV_DIMENSION_BUFFER;
 	uavDesc.Buffer.FirstElement				 = 0;
 	uavDesc.Buffer.NumElements				 = outputBufferSize;
-	uavDesc.Buffer.StructureByteStride		 = sizeof(unsigned int);
+	uavDesc.Buffer.StructureByteStride		 = sizeof(float);
 	uavDesc.Buffer.CounterOffsetInBytes		 = 0;
 	uavDesc.Buffer.Flags					 = D3D12_BUFFER_UAV_FLAG_NONE;
 
@@ -322,7 +330,7 @@ void CreateUAV()
 	srvDesc.ViewDimension					= D3D12_SRV_DIMENSION_BUFFER;
 	srvDesc.Buffer.FirstElement				= 0;
 	srvDesc.Buffer.NumElements				= outputBufferSize;
-	srvDesc.Buffer.StructureByteStride		= sizeof(unsigned int);
+	srvDesc.Buffer.StructureByteStride		= sizeof(float);
 	srvDesc.Buffer.Flags					= D3D12_BUFFER_SRV_FLAG_NONE;
 
 	CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(srvUavHeap->GetCPUDescriptorHandleForHeapStart(),
@@ -334,16 +342,17 @@ void CreateUAV()
 
 void CreateData()
 {
-	unsigned int data[outputBufferSize];
-	const UINT dataSize = outputBufferSize * sizeof(unsigned int);
+	float data[outputBufferSize];
+	const UINT dataSize = outputBufferSize * sizeof(float);
 	std::cout << "Initial Data:\n";
 	for(int i = 0; i < outputBufferSize; i++)
 	{
-		data[i] = (float)outputBufferSize - i;
+		//data[i] = (float)outputBufferSize - i;
+		data[i] = ((float)rand()) / ((float)RAND_MAX) * 99 + 1;
 		std::cout << data[i] << std::endl;
 		//arr2[i] = ((float)rand()) / ((float)RAND_MAX) * 99 + 1;
 	}
-	UINT cbSizeAligned = (sizeof(unsigned int) + 255) & ~255;
+	UINT cbSizeAligned = (sizeof(float) + 255) & ~255;
 
 	void* dataBegin   = nullptr;
 	D3D12_RANGE range = {0, 0};
