@@ -12,6 +12,7 @@
 #include <vector>
 #include "Source/DX12Common.h"
 #include "Source/GPUComputing.h"
+#include "Source/Copying.h"
 // TODO: add headers that you want to pre-compile here
 
 #endif //PCH_H

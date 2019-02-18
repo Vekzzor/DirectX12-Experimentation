@@ -5,14 +5,10 @@ using namespace Microsoft::WRL;
 
 ComPtr<ID3D12Device4> device;
 
-ComPtr<ID3D12CommandQueue> copyQueue;
-ComPtr<ID3D12CommandAllocator> copyAllocator;
-ComPtr<ID3D12GraphicsCommandList> copyList;
+const UINT bufferSize = 5;
 
-ComPtr<ID3D12Resource> bufferReadback;
-const UINT outputBufferSize = 5;
-ComPtr<ID3D12Resource1> outputBuffer;
-
+ComPtr<ID3D12Resource1> bufferReadback;
+ComPtr<ID3D12Resource1> inputBuffer;
 ComPtr<ID3D12Resource1> uavBuffer;
 ComPtr<ID3D12Resource1> srvBuffer;
 
@@ -20,103 +16,87 @@ ComPtr<ID3D12Fence1> Fence = nullptr;
 int fenceValue			   = 0;
 HANDLE EventHandle		   = nullptr;
 
-ComPtr<ID3D12DescriptorHeap> srvUavHeap;
-ComPtr<ID3D12DescriptorHeap> uploadHeap;
 UINT srvUavDescriptorSize;
-
-ComPtr<ID3D12RootSignature> outputRootSignature;
+ComPtr<ID3D12DescriptorHeap> srvUavHeapDescriptor;
+ComPtr<ID3D12RootSignature> RootSignature;
 
 ID3DBlob* computeBlob;
 
 GPUComputing gpuComputing;
+Copying copying;
 
 void CreateDevice();
-void CreateCopyCommandInterface();
 void CreateFenceAndEvent();
 void CreateRootSignature(); //For Compute
 void CreateShader(); //For Compute
 void CreateBuffers();
-void CreateUAV(); //For Compute
+void CreateSrvUavHeap(); //For Compute
+void CreateResourceViews(); //For Shaders
 void CreateData();
 void WaitForGPU(ID3D12CommandQueue* queue);
-
-void PopulateComputeCommandQueue(GPUComputing& computing);
+void readBackData();
 
 int main()
 {
 	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
-	system("pause");
+	//system("pause");
 	CreateDevice();
-	CreateCopyCommandInterface();
 
 	CreateFenceAndEvent();
 	CreateRootSignature();
 
 	CreateBuffers();
-	CreateUAV();
+	CreateSrvUavHeap();
+	CreateResourceViews();
 	CreateData();
-
 	CreateShader();
-	gpuComputing.init(device.Get(), computeBlob, outputRootSignature.Get());
+
+	copying.init(device.Get());
+	gpuComputing.init(device.Get(), computeBlob, RootSignature.Get());
+	gpuComputing.DescriptorHeap(srvUavHeapDescriptor.Get());
 
 	//Copy upload data to uav
-	copyAllocator->Reset();
-	copyList->Reset(copyAllocator.Get(), nullptr);
-	copyList->CopyResource(uavBuffer.Get(), outputBuffer.Get());
-	copyList->CopyResource(srvBuffer.Get(), outputBuffer.Get());
-	copyList->Close();
-
-	ID3D12CommandList* copylistsToExecute[] = {copyList.Get()};
-	copyQueue->ExecuteCommandLists(ARRAYSIZE(copylistsToExecute), copylistsToExecute);
-	WaitForGPU(copyQueue.Get());
+	ID3D12CommandList* copylistsToExecute[] = {copying.getCommandList()};
+	{
+		ID3D12Resource1* destBuffers[] = {uavBuffer.Get(), srvBuffer.Get()};
+		copying.PopulateComputeCommandQueue(inputBuffer.Get(), ARRAYSIZE(destBuffers), destBuffers);
+		copying.getCommandQueue()->ExecuteCommandLists(ARRAYSIZE(copylistsToExecute),
+													   copylistsToExecute);
+		WaitForGPU(copying.getCommandQueue());
+	}
 
 	//run computeShader
-	double time = 0;
-	auto start  = std::chrono::high_resolution_clock::now();
-	while(time < 10)
 	{
-		PopulateComputeCommandQueue(gpuComputing);
-		ID3D12CommandList* listsToExecute[] = {gpuComputing.CommandList()};
-		gpuComputing.CommandQueue()->ExecuteCommandLists(ARRAYSIZE(listsToExecute), listsToExecute);
+		gpuComputing.PopulateComputeCommandQueue();
+		ID3D12CommandList* listsToExecute[] = {gpuComputing.getCommandList()};
+		gpuComputing.getCommandQueue()->ExecuteCommandLists(ARRAYSIZE(listsToExecute),
+															listsToExecute);
 
-		WaitForGPU(gpuComputing.CommandQueue());
-		auto end									  = std::chrono::high_resolution_clock::now();
-		std::chrono::duration<double> elapsed_seconds = end - start;
-		time										  = elapsed_seconds.count();
+		WaitForGPU(gpuComputing.getCommandQueue());
 	}
 
 	//Copy uav data to readback
-	copyAllocator->Reset();
-	copyList->Reset(copyAllocator.Get(), nullptr);
-	copyList->CopyResource(bufferReadback.Get(), uavBuffer.Get());
-	copyList->Close();
-
-	ID3D12CommandList* copylistsToExecute2[] = {copyList.Get()};
-	copyQueue->ExecuteCommandLists(ARRAYSIZE(copylistsToExecute2), copylistsToExecute2);
-
-	WaitForGPU(copyQueue.Get());
-
-	float* bufferdata;
-	D3D12_RANGE readRange = {0, outputBufferSize * sizeof(float)};
-	bufferReadback->Map(0, &readRange, reinterpret_cast<void**>(&bufferdata));
-	std::cout << "\nParsed Data:\n";
-	for(int i = 0; i < outputBufferSize; i++)
 	{
-		std::cout << bufferdata[i] << std::endl;
+		copying.PopulateComputeCommandQueue(uavBuffer.Get(), bufferReadback.Get());
+		copying.getCommandQueue()->ExecuteCommandLists(ARRAYSIZE(copylistsToExecute),
+													   copylistsToExecute);
+		WaitForGPU(copying.getCommandQueue());
 	}
-	bufferReadback->Unmap(0, nullptr);
-	system("pause");
+
+	readBackData();
 	return 0;
 }
-
+//Dependencies: None
 void CreateDevice()
 {
+#if _DEBUG
 	ComPtr<ID3D12Debug> debugController;
 
 	if(SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
 	{
 		debugController->EnableDebugLayer();
 	}
+#endif
 
 	IDXGIFactory6* factory = nullptr;
 	IDXGIAdapter1* adapter = nullptr;
@@ -152,20 +132,7 @@ void CreateDevice()
 	SafeRelease(&factory);
 }
 
-void CreateCopyCommandInterface()
-{
-	D3D12_COMMAND_QUEUE_DESC descCopyQueue = {};
-	descCopyQueue.Flags					   = D3D12_COMMAND_QUEUE_FLAG_NONE;
-	descCopyQueue.Type					   = D3D12_COMMAND_LIST_TYPE_COPY;
-	ThrowIfFailed(device->CreateCommandQueue(&descCopyQueue, IID_PPV_ARGS(&copyQueue)));
-	ThrowIfFailed(
-		device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&copyAllocator)));
-	ThrowIfFailed(device->CreateCommandList(
-		0, D3D12_COMMAND_LIST_TYPE_COPY, copyAllocator.Get(), nullptr, IID_PPV_ARGS(&copyList)));
-	copyList->SetName(L"copy list");
-	copyList->Close();
-}
-
+//Dependencies: None
 void CreateFenceAndEvent()
 {
 	device->CreateFence(fenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence));
@@ -174,6 +141,7 @@ void CreateFenceAndEvent()
 	EventHandle = CreateEvent(0, false, false, 0);
 }
 
+//Dependencies: None
 void CreateRootSignature()
 {
 	D3D12_DESCRIPTOR_RANGE dtRanges[2];
@@ -209,9 +177,10 @@ void CreateRootSignature()
 	D3D12SerializeRootSignature(&rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sBlob, nullptr);
 
 	device->CreateRootSignature(
-		0, sBlob->GetBufferPointer(), sBlob->GetBufferSize(), IID_PPV_ARGS(&outputRootSignature));
+		0, sBlob->GetBufferPointer(), sBlob->GetBufferSize(), IID_PPV_ARGS(&RootSignature));
 }
 
+//Dependencies: None
 void CreateShader()
 {
 	ThrowIfFailed(D3DCompileFromFile(L"Shaders/ComputeShader2.hlsl",
@@ -225,11 +194,12 @@ void CreateShader()
 									 nullptr));
 }
 
+//Dependencies: dataSize
 void CreateBuffers()
 {
 	D3D12_HEAP_PROPERTIES srvHeapProperties{CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT)};
-	D3D12_RESOURCE_DESC srvBufferDesc{CD3DX12_RESOURCE_DESC::Buffer(outputBufferSize)};
-	srvBufferDesc.Width = sizeof(float) * outputBufferSize;
+	D3D12_RESOURCE_DESC srvBufferDesc{CD3DX12_RESOURCE_DESC::Buffer(bufferSize)};
+	srvBufferDesc.Width = sizeof(float) * bufferSize;
 	srvBufferDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 	ThrowIfFailed(device->CreateCommittedResource(&srvHeapProperties,
 												  D3D12_HEAP_FLAG_NONE,
@@ -241,8 +211,8 @@ void CreateBuffers()
 	srvBuffer->SetName(L"srv buffer");
 
 	D3D12_HEAP_PROPERTIES uavHeapProperties{CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT)};
-	D3D12_RESOURCE_DESC uavBufferDesc{CD3DX12_RESOURCE_DESC::Buffer(outputBufferSize)};
-	uavBufferDesc.Width = sizeof(float) * outputBufferSize;
+	D3D12_RESOURCE_DESC uavBufferDesc{CD3DX12_RESOURCE_DESC::Buffer(bufferSize)};
+	uavBufferDesc.Width = sizeof(float) * bufferSize;
 	uavBufferDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 	ThrowIfFailed(device->CreateCommittedResource(&uavHeapProperties,
 												  D3D12_HEAP_FLAG_NONE,
@@ -254,16 +224,16 @@ void CreateBuffers()
 	uavBuffer->SetName(L"uav buffer");
 
 	D3D12_HEAP_PROPERTIES defaultHeapProperties{CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD)};
-	D3D12_RESOURCE_DESC outputBufferDesc{CD3DX12_RESOURCE_DESC::Buffer(outputBufferSize)};
-	outputBufferDesc.Width = sizeof(float) * outputBufferSize;
+	D3D12_RESOURCE_DESC outputBufferDesc{CD3DX12_RESOURCE_DESC::Buffer(bufferSize)};
+	outputBufferDesc.Width = sizeof(float) * bufferSize;
 	ThrowIfFailed(device->CreateCommittedResource(&defaultHeapProperties,
 												  D3D12_HEAP_FLAG_NONE,
 												  &outputBufferDesc,
 												  D3D12_RESOURCE_STATE_GENERIC_READ,
 												  nullptr,
-												  IID_PPV_ARGS(&outputBuffer)));
+												  IID_PPV_ARGS(&inputBuffer)));
 
-	outputBuffer->SetName(L"output buffer");
+	inputBuffer->SetName(L"upload buffer");
 
 	D3D12_HEAP_PROPERTIES const heapPropertiesReadback = {/*Type*/ D3D12_HEAP_TYPE_READBACK
 														  /*CPUPageProperty*/,
@@ -278,7 +248,7 @@ void CreateBuffers()
 	D3D12_RESOURCE_DESC buffersDesc = {};
 	buffersDesc.Dimension			= D3D12_RESOURCE_DIMENSION_BUFFER;
 	buffersDesc.Alignment			= 0;
-	buffersDesc.Width				= sizeof(float) * outputBufferSize;
+	buffersDesc.Width				= sizeof(float) * bufferSize;
 	buffersDesc.Height				= 1;
 	buffersDesc.DepthOrArraySize	= 1;
 	buffersDesc.MipLevels			= 1;
@@ -298,29 +268,35 @@ void CreateBuffers()
 	bufferReadback->SetName(L"readback buffer");
 }
 
-void CreateUAV()
+//Dependencies: None* (based on root signatures descriptor type ammount maybe?)
+void CreateSrvUavHeap()
 {
 	D3D12_DESCRIPTOR_HEAP_DESC srvUavHeapDesc = {};
 	srvUavHeapDesc.NumDescriptors			  = 2;
 	srvUavHeapDesc.Type						  = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvUavHeapDesc.Flags					  = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-	ThrowIfFailed(device->CreateDescriptorHeap(&srvUavHeapDesc, IID_PPV_ARGS(&srvUavHeap)));
+	ThrowIfFailed(
+		device->CreateDescriptorHeap(&srvUavHeapDesc, IID_PPV_ARGS(&srvUavHeapDescriptor)));
 
-	srvUavHeap->SetName(L"srvUav heap");
+	srvUavHeapDescriptor->SetName(L"srvUav heap");
 	srvUavDescriptorSize =
 		device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
 
+//Dependencies: HeapDescriptor, Resources(Buffers)
+void CreateResourceViews()
+{
 	D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
 	uavDesc.Format							 = DXGI_FORMAT_UNKNOWN;
 	uavDesc.ViewDimension					 = D3D12_UAV_DIMENSION_BUFFER;
 	uavDesc.Buffer.FirstElement				 = 0;
-	uavDesc.Buffer.NumElements				 = outputBufferSize;
+	uavDesc.Buffer.NumElements				 = bufferSize;
 	uavDesc.Buffer.StructureByteStride		 = sizeof(float);
 	uavDesc.Buffer.CounterOffsetInBytes		 = 0;
 	uavDesc.Buffer.Flags					 = D3D12_BUFFER_UAV_FLAG_NONE;
 
 	CD3DX12_CPU_DESCRIPTOR_HANDLE uavHandle(
-		srvUavHeap->GetCPUDescriptorHandleForHeapStart(), 0, srvUavDescriptorSize);
+		srvUavHeapDescriptor->GetCPUDescriptorHandleForHeapStart(), 0, srvUavDescriptorSize);
 
 	device->CreateUnorderedAccessView(uavBuffer.Get(), nullptr, &uavDesc, uavHandle);
 
@@ -329,23 +305,25 @@ void CreateUAV()
 	srvDesc.Format							= DXGI_FORMAT_UNKNOWN;
 	srvDesc.ViewDimension					= D3D12_SRV_DIMENSION_BUFFER;
 	srvDesc.Buffer.FirstElement				= 0;
-	srvDesc.Buffer.NumElements				= outputBufferSize;
+	srvDesc.Buffer.NumElements				= bufferSize;
 	srvDesc.Buffer.StructureByteStride		= sizeof(float);
 	srvDesc.Buffer.Flags					= D3D12_BUFFER_SRV_FLAG_NONE;
 
-	CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(srvUavHeap->GetCPUDescriptorHandleForHeapStart(),
-											1 /*offsetInDescriptors*/,
-											srvUavDescriptorSize /*descriptorIncrementSize*/);
+	CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(
+		srvUavHeapDescriptor->GetCPUDescriptorHandleForHeapStart(),
+		1 /*offsetInDescriptors*/,
+		srvUavDescriptorSize /*descriptorIncrementSize*/);
 
 	device->CreateShaderResourceView(srvBuffer.Get(), &srvDesc, srvHandle);
 }
 
+//Dependencies: dataSize, CPU-Readable Resources(buffers)
 void CreateData()
 {
-	float data[outputBufferSize];
-	const UINT dataSize = outputBufferSize * sizeof(float);
+	float data[bufferSize];
+	const UINT dataSize = ARRAYSIZE(data);
 	std::cout << "Initial Data:\n";
-	for(int i = 0; i < outputBufferSize; i++)
+	for(int i = 0; i < bufferSize; i++)
 	{
 		//data[i] = (float)outputBufferSize - i;
 		data[i] = ((float)rand()) / ((float)RAND_MAX) * 99 + 1;
@@ -356,11 +334,12 @@ void CreateData()
 
 	void* dataBegin   = nullptr;
 	D3D12_RANGE range = {0, 0};
-	outputBuffer->Map(0, &range, &dataBegin);
+	inputBuffer->Map(0, &range, &dataBegin);
 	memcpy(dataBegin, &data, sizeof(data));
-	outputBuffer->Unmap(0, nullptr);
+	inputBuffer->Unmap(0, nullptr);
 }
 
+//Dependencies: Fence, CommandQueue
 void WaitForGPU(ID3D12CommandQueue* queue)
 {
 	const UINT64 fence = fenceValue;
@@ -375,23 +354,16 @@ void WaitForGPU(ID3D12CommandQueue* queue)
 	fenceValue++;
 }
 
-void PopulateComputeCommandQueue(GPUComputing& computing)
+//Dependencies: dataSize, CPU-Readable Resources(buffers)
+void readBackData()
 {
-	ID3D12CommandAllocator* allocator	  = computing.CommandAllocator();
-	ID3D12GraphicsCommandList* commandList = computing.CommandList();
-	ID3D12PipelineState* pipelineState	 = computing.PipelineState();
-
-	allocator->Reset();
-	commandList->Reset(allocator, pipelineState);
-
-	ID3D12DescriptorHeap* descriptorHeaps[] = {srvUavHeap.Get()};
-
-	commandList->SetDescriptorHeaps(ARRAYSIZE(descriptorHeaps), descriptorHeaps);
-
-	commandList->SetComputeRootSignature(outputRootSignature.Get());
-
-	commandList->SetComputeRootDescriptorTable(0, srvUavHeap->GetGPUDescriptorHandleForHeapStart());
-
-	commandList->Dispatch(5, 1, 1);
-	commandList->Close();
+	float* bufferdata;
+	D3D12_RANGE readRange = {0, bufferSize * sizeof(float)};
+	bufferReadback->Map(0, &readRange, reinterpret_cast<void**>(&bufferdata));
+	std::cout << "\nParsed Data:\n";
+	for(int i = 0; i < bufferSize; i++)
+	{
+		std::cout << bufferdata[i] << std::endl;
+	}
+	bufferReadback->Unmap(0, nullptr);
 }
