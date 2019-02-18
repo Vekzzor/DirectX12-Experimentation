@@ -28,7 +28,7 @@ void GPUComputing::PopulateComputeCommandQueue()
 	m_pComputeList->SetComputeRootDescriptorTable(0,
 												  m_DescHeap->GetGPUDescriptorHandleForHeapStart());
 
-	m_pComputeList->Dispatch(5, 1, 1);
+	m_pComputeList->Dispatch(4, 1, 1);
 	m_pComputeList->Close();
 }
 

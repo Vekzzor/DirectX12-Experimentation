@@ -5,7 +5,7 @@ using namespace Microsoft::WRL;
 
 ComPtr<ID3D12Device4> device;
 
-const UINT bufferSize = 5;
+const UINT bufferSize = 512;
 
 ComPtr<ID3D12Resource1> bufferReadback;
 ComPtr<ID3D12Resource1> inputBuffer;
@@ -71,7 +71,6 @@ int main()
 		ID3D12CommandList* listsToExecute[] = {gpuComputing.getCommandList()};
 		gpuComputing.getCommandQueue()->ExecuteCommandLists(ARRAYSIZE(listsToExecute),
 															listsToExecute);
-
 		WaitForGPU(gpuComputing.getCommandQueue());
 	}
 
@@ -183,7 +182,7 @@ void CreateRootSignature()
 //Dependencies: None
 void CreateShader()
 {
-	ThrowIfFailed(D3DCompileFromFile(L"Shaders/ComputeShader2.hlsl",
+	ThrowIfFailed(D3DCompileFromFile(L"Shaders/ComputeShader3.hlsl",
 									 nullptr,
 									 nullptr,
 									 "CS_main",
@@ -357,13 +356,29 @@ void WaitForGPU(ID3D12CommandQueue* queue)
 //Dependencies: dataSize, CPU-Readable Resources(buffers)
 void readBackData()
 {
+	float temp;
+	bool sorted = true;
 	float* bufferdata;
 	D3D12_RANGE readRange = {0, bufferSize * sizeof(float)};
 	bufferReadback->Map(0, &readRange, reinterpret_cast<void**>(&bufferdata));
 	std::cout << "\nParsed Data:\n";
+	temp = bufferdata[0];
 	for(int i = 0; i < bufferSize; i++)
 	{
 		std::cout << bufferdata[i] << std::endl;
+		if(temp > bufferdata[i])
+			sorted = false;
+
+
+		if (!sorted)
+		{
+			std::cout << "FAKE" << std::endl;
+		}
+		temp = bufferdata[i];
+	}
+	if(!sorted)
+	{
+		std::cout << "SORT FAILED" << std::endl;
 	}
 	bufferReadback->Unmap(0, nullptr);
 }
